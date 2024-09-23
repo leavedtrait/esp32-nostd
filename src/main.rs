@@ -80,7 +80,7 @@ fn main() -> ! {
     // }
     //}
     println!("connecting...");
-    let mut dhtsensor = io.pins.gpio25;
+    let mut dhtsensor = io.pins.gpio26;
 
     let mut dht = dhtt11::Dht::new(&mut dhtsensor, DhttType::DHT11); // Using GPIO pin 4, DHT22 sensor type
 
