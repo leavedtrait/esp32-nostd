@@ -1,21 +1,20 @@
-
 use esp_hal::{
     delay::Delay,
     gpio::{Flex, InputPin, OutputPin},
-    peripheral::Peripheral,
 };
 use esp_println::println;
+use log::info;
 
-const DHT22: u8 = 22;
-const DHT11: u8 = 11;
-
-const TIMEOUT: u32 = 0xFFFFFFFF;
+//const TIMEOUT: u32 = 0xFFFFFFFF;
 const MIN_INTERVAL: u32 = 2000;
+//const DHT11_START_LOW: u32 = 18; // milliseconds to pull data line low for DHT11
+const DHT11_START_HIGH: u32 = 20; // microseconds to pull data line high
 
 pub enum DhttType {
     DHT11,
-    DHT22
+    DHT22,
 }
+
 pub struct Dht<'a, P> {
     pin: Flex<'a, P>,
     last_read_time: u32,
@@ -28,14 +27,16 @@ impl<'a, P> Dht<'a, P>
 where
     P: InputPin + OutputPin,
 {
-    pub fn new(pin: impl Peripheral<P = P> + 'a, sensor_type: DhttType) -> Self {
+    pub fn new(pin: Flex<'a, P>, dht: DhttType) -> Self {
         let max_cycles = 1000; // max_cycles for timeout handling
-        let pull_time = 55; // pull time default (microseconds)
-
-        Dht {
-            pin: Flex::new(pin),
+        let pull_time = match dht {
+            DhttType::DHT11 => DHT11_START_HIGH,
+            DhttType::DHT22 => 75, // for DHT22 typically
+        };
+        Self {
+            pin,
             last_read_time: 0,
-            sensor_type,
+            sensor_type: dht,
             max_cycles,
             pull_time,
         }
@@ -44,90 +45,88 @@ where
     /// Begin communication with the sensor
     pub fn begin(&mut self, delay: &mut Delay) {
         self.pin.set_high();
-        println!("setting data line high ");
-        delay.delay_millis(MIN_INTERVAL); // Ensures >= MIN_INTERVAL
+        info!("Setting data line high");
+        delay.delay_millis(MIN_INTERVAL); // Ensure >= MIN_INTERVAL
         self.last_read_time = 0; // Reset the last read time
     }
 
-    /// Read temperature from the sensor
-    pub fn read_temperature(&mut self, delay: &mut Delay, fahrenheit: bool) -> Option<f32> {
-        if let Some(data) = self.read_sensor_data(delay) {
-            let mut temperature = match self.sensor_type {
-                DhttType::DHT11 => (data[2] as f32) + (data[3] as f32) * 0.1,
-                DhttType::DHT22 => ((data[2] as u16 & 0x7F) << 8 | data[3] as u16) as f32 * 0.1,
-            };
+    // Send start signal and read data from the sensor
+    pub fn read(&mut self, delay: &mut Delay) -> Result<(), &'static str> {
+        // Send the start signal
+        self.send_start_signal(delay);
 
-            if data[2] & 0x80 != 0 {
-                temperature = -temperature;
-            }
+        // Read the response from the sensor
+        let mut data: [u8; 5] = [0; 5];
 
-            if fahrenheit {
-                Some(temperature * 1.8 + 32.0) // Convert to Fahrenheit
-            } else {
-                Some(temperature)
-            }
-        } else {
-            None
-        }
-    }
-
-    /// Read humidity from the sensor
-    pub fn read_humidity(&mut self, delay: &mut Delay) -> Option<f32> {
-        if let Some(data) = self.read_sensor_data(delay) {
-            let humidity = match self.sensor_type {
-                DhttType::DHT11 => (data[0] as f32) + (data[1] as f32) * 0.1,
-                DhttType::DHT22 => ((data[0] as u16) << 8 | data[1] as u16) as f32 * 0.1,
-            };
-
-            Some(humidity)
-        } else {
-            None
-        }
-    }
-
-    /// Reads raw sensor data
-    fn read_sensor_data(&mut self, delay: &mut Delay) -> Option<[u8; 5]> {
-        let mut data = [0u8; 5];
-
-        // Send start signal
-        self.pin.set_low();
-        delay.delay_millis(18); // Pull low for 18 ms
-        self.pin.set_high();
-        delay.delay_micros(self.pull_time); // Wait for sensor response
-        self.pin.set_low();
-
-        // Now read the 40 bits of data
+        // Read each byte (8 bits) from the sensor
         for i in 0..40 {
-            let result1 = self.expect_pulse(delay, false);
-            let result2 = self.expect_pulse(delay, true);
-            if result1.is_err() || result2.is_err() {
-                return None;
+            data[i/8] <<=1;
+            if self.read_bit(delay) {
+                data[i/8] |= 1;
             }
-
-            data[i / 8] <<= 1;
-            if self.pin.is_high() {
-                data[i / 8] |= 1;
-            }
+            
         }
 
-        // Verify checksum
-        if data[4] == ((data[0] + data[1] + data[2] + data[3]) & 0xFF) {
-            Some(data)
-        } else {
-            None
+        for i in 0..data.len() {
+            println!("data {}", data[i]);
         }
+
+        // Validate checksum (data[4] should be the sum of data[0..3])
+        let checksum = data[0]
+            .wrapping_add(data[1])
+            .wrapping_add(data[2])
+            .wrapping_add(data[3]);
+        if checksum != data[4] {
+            return Err("Checksum error");
+        }
+
+        // Extract temperature and humidity values
+        let humidity = u16::from(data[1]) * 10 + u16::from(data[0]); // For DHT11, the humidity is in the first byte
+        let mut temperature = i16::from(data[3] & 0x7f)* 10 + i16::from(data[2]); // For DHT11, the temperature is in the third byte
+        if(data[2] & 0x80) != 0 {
+            temperature = -temperature;
+        }
+
+        // Print out the sensor values
+        println!("Humidity: {}%", humidity);
+        println!("Temperature: {}°C", temperature);
+
+        Ok(())
+    }
+  
+
+    /// Send the start signal to the DHT sensor
+    fn send_start_signal(&mut self, delay: &mut Delay) {
+        self.pin.set_as_output();
+        self.pin.set_high();
+        delay.delay_millis(1);
+        self.pin.set_low();
+        delay.delay_millis(20);
+        self.pin.set_high();
+        self.pin.set_as_input(esp_hal::gpio::Pull::None);
+        delay.delay_micros(40);
+        self.read_bit(delay);
+    }
+    fn read_bit(&mut self, delay: &mut Delay) -> bool {
+        let low = self.wait_for_state(true, delay);
+        let high: u32 = self.wait_for_state(false, delay);
+        high>low
     }
 
-    /// Expect a pulse on the data line (low or high) and return its duration
-    fn expect_pulse(&mut self, delay: &mut Delay, level: bool) -> Result<u32, ()> {
-        let mut count = 0;
-        while self.pin.is_high() == level {
-            count += 1;
-            if count >= self.max_cycles {
-                return Err(());
+    /// Wait for the pin to change to the specified state (low = false, high = true)
+    fn wait_for_state(&mut self, state: bool, delay: &mut Delay) -> u32 {
+        let mut cycles = 0;
+        //self.pin.set_as_input(esp_hal::gpio::Pull::Up);
+        while self.pin.is_high() != state {
+            cycles += 1;
+            if cycles > self.max_cycles {
+                return 0;
             }
-            delay.delay_micros(1);
+            delay.delay_micros(1); // Short delay to avoid busy waiting
         }
-        Ok(count)
+
+        cycles
     }
+
+   
 }

@@ -4,11 +4,14 @@
 use dhtt11::DhttType;
 use esp_backtrace as _;
 use esp_hal::{
-    clock::ClockControl, delay::Delay, gpio::{Io, Level, Output}, mcpwm::{
-        operator::PwmPinConfig,
-        timer::PwmWorkingMode,
-        McPwm, PeripheralClockConfig,
-    }, peripherals::Peripherals, prelude::*, rtc_cntl::Rtc, system::SystemControl
+    clock::ClockControl,
+    delay::Delay,
+    gpio::{Flex, Io, Level, Output},
+    mcpwm::{operator::PwmPinConfig, timer::PwmWorkingMode, McPwm, PeripheralClockConfig},
+    peripherals::Peripherals,
+    prelude::*,
+    rtc_cntl::Rtc,
+    system::SystemControl,
 };
 use esp_println::println;
 use log::info;
@@ -80,9 +83,9 @@ fn main() -> ! {
     // }
     //}
     println!("connecting...");
-    let mut dhtsensor = io.pins.gpio26;
+    let dhtsensor = Flex::new(io.pins.gpio4);
 
-    let mut dht = dhtt11::Dht::new(&mut dhtsensor, DhttType::DHT11); // Using GPIO pin 4, DHT22 sensor type
+    let mut dht = dhtt11::Dht::new(dhtsensor, DhttType::DHT11); // Using GPIO pin 4, DHT22 sensor type
 
     dht.begin(&mut delay);
 
@@ -99,17 +102,13 @@ fn main() -> ! {
                 }
             }
             pwm_pin.set_timestamp(array[i].try_into().unwrap());
-            info!("brightness {}%", array[i]);
+            // info!("brightness {}%", array[i]);
             delay.delay_millis(10);
         }
-        if let Some(temp) = dht.read_temperature(&mut delay, false) {
-            // Use the temperature value (Celsius)
-            info!("temp {}", temp)
-        }
-
-        if let Some(humidity) = dht.read_humidity(&mut delay) {
-            // Use the humidity value
-            info!("humidity {}", humidity)
+        // Read and print sensor values
+        match dht.read(&mut delay) {
+            Ok(_) => info!("Successfully read sensor data"),
+            Err(e) => println!("Failed to read sensor data: {}", e),
         }
 
         delay.delay_millis(2000); // Wait 2 seconds before next read
